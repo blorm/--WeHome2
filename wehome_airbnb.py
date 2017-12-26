@@ -9,6 +9,7 @@ import pymysql.cursors
 import datetime
 from selenium import webdriver
 import pandas as pd
+import matplotlib.pyplot as plt
 
 def setProxy():
     proxy_addr = '183.88.195.231:8080'
@@ -78,16 +79,10 @@ def getRoomType(page):
     match = findOnly('"room_and_property_type":"[\w ]*"', page)
     return match.split(':')[-1][1:-1]
 
-def insertRoom(roomNo, location, room_type,
-              guest, bedroom, bed, bathroom):
+def mysql(sql):
     connection = pymysql.connect(host='localhost', port=3306,
                                  user='root', password='admin',
                                  db='how', charset='utf8')
-
-    sql = "INSERT INTO airbnb values(null, %d, %f, %f, '%s', %f, %d, %f, %f)" \
-            %(roomNo, location[0], location[1], room_type, guest,
-              bedroom, bed, bathroom)
-    # print sql
     try:
         with connection.cursor() as cursor:
             cursor.execute(sql)
@@ -95,27 +90,31 @@ def insertRoom(roomNo, location, room_type,
     finally:
         connection.close()
 
-def price(url):
-    headers = {
-        'Accept-Language': 'en-US',
-        'User-Agent': 'Mozilla/5.0 (Macintosh;) AppleWebKit/603.2.4',
-        'Connection': 'keep-alive'
-    }
-    cap = {}
-    for key, value in headers.items():
-        cap['phantomjs.page.customHeaders.{}'.format(key)] = value
-    driver = webdriver.PhantomJS(desired_capabilities=cap)
+def queryPrice(url):
+    options = webdriver.ChromeOptions()
+    options.add_argument('lang=en')
+
+    driver = webdriver.Chrome(chrome_options=options)
+    driver.set_window_size(1200, 800)
     driver.get(url)
-    page = driver.page_source
-    print page
+    text = driver.find_element_by_xpath('html').text
 
-    # page_source is static page, not dynamic....
+    #   $1,203,19 x 10 nights
+    pattern = re.compile('.(\d+,)*\d+ x \d+ night')
+    match = re.findall(pattern, text)
+    if len(match) == 1:
+        print match
+        price = match[0].split(' ')[0]
+    else:
+        price = 'No'
 
-    return 1, 1
-
+    driver.quit()
+    return price
 
 def queryRent(url, elapse):
     today = datetime.datetime.now()
+    delta0 = datetime.timedelta(days=181)
+    today += delta0
     todayShort = today.strftime('%Y-%m-%d')
 
     delta1 = datetime.timedelta(days=1)
@@ -128,42 +127,89 @@ def queryRent(url, elapse):
     page = download(queryUrl)
     match = findOnly('"min_nights":\d+', page)
     min_nights = int( match.split(':')[-1] )
+    delta_min = datetime.timedelta(days=min_nights)
 
     deltaElapse = datetime.timedelta(days=elapse)
-    endday = today + deltaElapse - min_nights
+    endday = today + deltaElapse - delta_min
 
     dayIn = today
+    tableName = 'price' + url.split('/')[-1]
     while dayIn < endday:
-        dayOut = dayIn + min_nights
+        dayOut = dayIn + delta_min
         dayInShort = dayIn.strftime('%Y-%m-%d')
         dayOutShort = dayOut.strftime('%Y-%m-%d')
 
         queryUrl = url + '?checkin=' + dayInShort \
-                       + '?checkout=' + dayOutShort
-        price =  price(queryUrl)
-        #...
+                       + '&checkout=' + dayOutShort
+        price =  queryPrice(queryUrl)
+        # print dayInShort, price
 
-        dayIn += delta1
+        if price != 'No':
+            for i in range(min_nights):
+                sql = "INSERT INTO %s values(null, '%s', '%s')" \
+                      % (tableName, dayInShort, price)
+                mysql(sql)
+                dayIn += delta1
+                dayInShort = dayIn.strftime("%Y-%m-%d")
+        else:
+            sql = "INSERT INTO %s values(null, '%s', '%s')" \
+                  % (tableName, dayInShort, 'No')
+            mysql(sql)
+            dayIn += delta1
+
+def queryAvailable(roomNo, mon):
+    tableName = 'price' + str(roomNo)
+
+    connection = pymysql.connect(host='localhost', port=3306,
+                                 user='root', password='admin',
+                                 db='how', charset='utf8')
+    sql = 'SELECT * FROM %s' % tableName
+    df = pd.read_sql(sql, connection, index_col='id')
+
+    price = df['price']
+    avail = 0
+    unavail = 0
+    for i in price:
+        if i == 'No':
+            unavail += 1
+        else:
+            avail += 1
+    sum = avail + unavail
+    avail = avail / 1.0 / sum
+    unavail = unavail / 1.0 / sum
+
+    fig = plt.figure(2)
+    rects = plt.bar(left = (0.3, avail),
+                    height = (0.7, unavail),
+                    width = 0.2, align = 'center', yerr=0.000001)
+    plt.title('Room ' + str(roomNo) + ' Availability in ' + str(mon) + ' Month')
+    plt.xticks((0.3, 0.8), ('Available', 'Unavailable'))
+    plt.show()
 
 
 if __name__ == '__main__':
     url = 'https://www.airbnb.com/rooms/18509589'
     roomNo = int(url.split('/')[-1])
 
-    setProxy()
-    page = download(url)
-    # savePage(roomNo, page)
-    # page = loadPage(roomNo)
-
-    location = getLocation(page)
-    room_type = getRoomType(page)
-    guest = getLabel('"guest_label"', page)
-    bedroom = getBedroom(page)
-    bed = getLabel('"bed_label"', page)
-    bathroom = getLabel('"bathroom_label"', page)
-
-    insertRoom(roomNo, location, room_type,
-              guest, bedroom, bed, bathroom)
+    # setProxy()
+    # page = download(url)
+    # # savePage(roomNo, page)
+    # # page = loadPage(roomNo)
+    #
+    # location = getLocation(page)
+    # room_type = getRoomType(page)
+    # guest = getLabel('"guest_label"', page)
+    # bedroom = getBedroom(page)
+    # bed = getLabel('"bed_label"', page)
+    # bathroom = getLabel('"bathroom_label"', page)
+    #
+    # sql = "INSERT INTO airbnb values(null, %d, %f, %f, '%s', %f, %d, %f, %f)" \
+    #       % (roomNo, location[0], location[1], room_type, guest,
+    #          bedroom, bed, bathroom)
+    # mysql(sql)
 
     elapse = 6 * 30
     queryRent(url, elapse)
+
+    queryAvailable(roomNo, 6)
+
